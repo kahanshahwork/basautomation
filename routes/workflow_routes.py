@@ -522,13 +522,17 @@ def advisors():
 def advisor_detail(advisor_id):
     conn = get_db()
     if request.method == "DELETE":
-        # Only allow deletion when the advisor has no clients (avoid orphaning data)
-        n = conn.execute("SELECT COUNT(*) AS c FROM clients WHERE advisor_id = ?", (advisor_id,)).fetchone()["c"]
-        if n > 0:
-            return jsonify({"error": f"Advisor has {n} client(s). Reassign or delete them first."}), 400
+        # Cascade: delete every client under this advisor (and all their data),
+        # then the advisor itself. Callers must confirm on the UI first.
+        client_ids = [r["id"] for r in conn.execute(
+            "SELECT id FROM clients WHERE advisor_id = ?", (advisor_id,)
+        ).fetchall()]
+        for cid in client_ids:
+            _cascade_delete_client(conn, cid)
         conn.execute("DELETE FROM advisors WHERE id = ?", (advisor_id,))
         conn.commit()
-        return jsonify({"deleted": advisor_id})
+        log_audit("advisor", advisor_id, "delete", detail=f"cascaded {len(client_ids)} client(s)")
+        return jsonify({"deleted": advisor_id, "clients_deleted": len(client_ids)})
     b = request.json or {}
     sets, vals = [], []
     for f in ("name", "firm", "email"):
@@ -541,6 +545,32 @@ def advisor_detail(advisor_id):
     conn.commit()
     row = conn.execute("SELECT * FROM advisors WHERE id = ?", (advisor_id,)).fetchone()
     return jsonify(dict(row)) if row else (jsonify({"error": "Not found"}), 404)
+
+
+def _cascade_delete_client(conn, client_id: int):
+    """Delete a client and ALL dependent data in FK-safe order:
+    transactions -> statements -> quarters, plus vendor_memory and
+    quarter/annual consolidations, then the client row itself."""
+    # Quarters belonging to this client
+    quarter_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM quarters WHERE client_id = ?", (client_id,)
+    ).fetchall()]
+
+    if quarter_ids:
+        qph = ",".join("?" * len(quarter_ids))
+        stmt_ids = [r["id"] for r in conn.execute(
+            f"SELECT id FROM statements WHERE quarter_id IN ({qph})", quarter_ids
+        ).fetchall()]
+        if stmt_ids:
+            sph = ",".join("?" * len(stmt_ids))
+            conn.execute(f"DELETE FROM transactions WHERE statement_id IN ({sph})", stmt_ids)
+            conn.execute(f"DELETE FROM statements WHERE id IN ({sph})", stmt_ids)
+        conn.execute(f"DELETE FROM quarter_consolidations WHERE quarter_id IN ({qph})", quarter_ids)
+        conn.execute(f"DELETE FROM quarters WHERE id IN ({qph})", quarter_ids)
+
+    conn.execute("DELETE FROM annual_consolidations WHERE client_id = ?", (client_id,))
+    conn.execute("DELETE FROM vendor_memory WHERE client_id = ?", (client_id,))
+    conn.execute("DELETE FROM clients WHERE id = ?", (client_id,))
 
 
 @workflow_bp.route("/clients", methods=["GET", "POST"])
@@ -568,11 +598,23 @@ def clients():
     return jsonify([dict(r) for r in rows])
 
 
-@workflow_bp.route("/clients/<int:client_id>", methods=["PATCH"])
+@workflow_bp.route("/clients/<int:client_id>", methods=["PATCH", "DELETE"])
 def update_client(client_id):
-    """Used by the client edit screen to change name and/or business_type."""
+    """PATCH: edit name/business_type/advisor. DELETE: cascade-remove the
+    client and all of its quarters, statements, transactions, vendor memory
+    and consolidations."""
     from core.business_types import is_valid_business_type
     conn = get_db()
+
+    if request.method == "DELETE":
+        row = conn.execute("SELECT id FROM clients WHERE id = ?", (client_id,)).fetchone()
+        if row is None:
+            return jsonify({"error": "Client not found"}), 404
+        _cascade_delete_client(conn, client_id)
+        conn.commit()
+        log_audit("client", client_id, "delete", detail="cascade")
+        return jsonify({"deleted": client_id})
+
     b = request.json or {}
 
     sets, vals = [], []
@@ -629,6 +671,28 @@ def quarters():
         q += " WHERE " + " AND ".join(conds)
     q += " ORDER BY period_start, label"
     return jsonify([dict(r) for r in conn.execute(q, tuple(params)).fetchall()])
+
+
+@workflow_bp.route("/quarters/<int:qid>", methods=["DELETE"])
+def delete_quarter(qid):
+    """Delete a quarter plus all its statements, transactions and saved
+    quarter consolidations."""
+    conn = get_db()
+    row = conn.execute("SELECT id FROM quarters WHERE id = ?", (qid,)).fetchone()
+    if row is None:
+        return jsonify({"error": "Quarter not found"}), 404
+    stmt_ids = [r["id"] for r in conn.execute(
+        "SELECT id FROM statements WHERE quarter_id = ?", (qid,)
+    ).fetchall()]
+    if stmt_ids:
+        sph = ",".join("?" * len(stmt_ids))
+        conn.execute(f"DELETE FROM transactions WHERE statement_id IN ({sph})", stmt_ids)
+        conn.execute(f"DELETE FROM statements WHERE id IN ({sph})", stmt_ids)
+    conn.execute("DELETE FROM quarter_consolidations WHERE quarter_id = ?", (qid,))
+    conn.execute("DELETE FROM quarters WHERE id = ?", (qid,))
+    conn.commit()
+    log_audit("quarter", qid, "delete", detail="cascade")
+    return jsonify({"deleted": qid})
 
 
 def _au_financial_year(date_str: str) -> str:

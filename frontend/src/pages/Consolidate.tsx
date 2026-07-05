@@ -60,7 +60,9 @@ function MergeTab({ quarterId, quarterLabel, clientName, onMerged }: {
   quarterId: number | null; quarterLabel: string | null; clientName: string | null;
   onMerged: (statementId: number, name: string) => void;
 }) {
+  const { setStatement, unlockNav, setPage } = useAppStore();
   const [statements, setStatements] = useState<Statement[]>([]);
+  const [mergedStatements, setMergedStatements] = useState<Statement[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
@@ -68,11 +70,25 @@ function MergeTab({ quarterId, quarterLabel, clientName, onMerged }: {
   const load = useCallback(async () => {
     if (!quarterId) return;
     const s = await statementsApi.list(quarterId);
-    // Don't offer already-consolidated statements as inputs
+    // Inputs = everything not already consolidated
     setStatements(s.filter(x => x.bank_id !== 'consolidated'));
+    // Merged = the consolidated outputs, shown as their own section
+    setMergedStatements(s.filter(x => x.bank_id === 'consolidated'));
   }, [quarterId]);
 
   useEffect(() => { load(); }, [load]);
+
+  function openMerged(s: Statement) {
+    setStatement(s.id, s.statement_name || s.filename || `#${s.id}`, 'consolidated');
+    unlockNav('approve', 'categorize', 'gst', 'pnl');
+    setPage('approve');
+  }
+
+  async function deleteMerged(id: number) {
+    if (!confirm('Delete this merged statement? The original source statements are not affected.')) return;
+    try { await statementsApi.delete(id); showToast('Merged statement deleted', 'info'); await load(); }
+    catch { showToast('Failed to delete', 'error'); }
+  }
 
   function toggle(id: number) {
     setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -87,6 +103,8 @@ function MergeTab({ quarterId, quarterLabel, clientName, onMerged }: {
       const r = await consolidationApi.mergeStatements(quarterId, [...selected], name.trim());
       if (r.error) throw new Error(r.error);
       showToast(`Merged into "${name}" (${r.txn_count} transactions)`, 'success');
+      setSelected(new Set()); setName('');
+      await load();
       onMerged(r.consolidated_statement_id!, name.trim());
     } catch (e) { showToast(e instanceof Error ? e.message : 'Merge failed', 'error'); }
     finally { setBusy(false); }
@@ -95,6 +113,7 @@ function MergeTab({ quarterId, quarterLabel, clientName, onMerged }: {
   if (!quarterId) return <NeedQuarter />;
 
   return (
+    <>
     <div className="card card-pad">
       <div style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 14, fontWeight: 700 }}>{clientName} · {quarterLabel}</div>
@@ -136,6 +155,34 @@ function MergeTab({ quarterId, quarterLabel, clientName, onMerged }: {
         </>
       )}
     </div>
+
+    {/* Existing merged statements for this quarter */}
+    <div className="card card-pad" style={{ marginTop: 16 }}>
+      <div style={{ fontSize: 14, fontWeight: 700 }}>Merged Statements</div>
+      <p style={{ fontSize: 12.5, color: 'var(--text-muted)', marginTop: 2, marginBottom: 12 }}>
+        Combined statements you've already created for this quarter. Open one to review its GST &amp; P&amp;L, or delete it.
+      </p>
+      {mergedStatements.length === 0 ? (
+        <div style={{ fontSize: 12.5, color: 'var(--text-muted)', padding: '6px 0' }}>
+          No merged statements yet. Select 2+ statements above and merge them.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {mergedStatements.map(s => (
+            <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 14px', border: '1px solid var(--border-light)', background: 'var(--brand-light)', borderRadius: 'var(--radius)' }}>
+              <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--brand)', background: 'var(--surface-card)', padding: '3px 8px', borderRadius: 5 }}>MERGED</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.statement_name || s.filename || `Statement #${s.id}`}</div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{s.txn_count ?? 0} transactions · {s.status}</div>
+              </div>
+              <button className="btn-secondary" style={{ fontSize: 12 }} onClick={() => openMerged(s)}>Open</button>
+              <button className="btn-secondary" style={{ fontSize: 12, color: 'var(--red)', borderColor: 'rgba(239,68,68,.3)' }} onClick={() => deleteMerged(s.id)}>Del</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+    </>
   );
 }
 

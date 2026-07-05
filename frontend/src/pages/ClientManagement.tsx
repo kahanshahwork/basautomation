@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useAppStore } from '../store/appStore';
-import { advisorsApi, clientsApi, quartersApi, statementsApi } from '../api/client';
+import { advisorsApi, clientsApi, quartersApi, statementsApi, consolidationApi } from '../api/client';
 import { showToast } from '../components/ui/Toast';
-import type { Advisor, Client, YearGroup, Quarter, Statement, BusinessType } from '../types';
+import { fmt } from '../utils/format';
+import type { Advisor, Client, YearGroup, Quarter, Statement, BusinessType, ConsolidationSummary } from '../types';
 
 /**
  * Client Management — hierarchical sidebar navigation:
@@ -24,6 +25,8 @@ export function ClientManagementPage() {
   const [selQuarter, setSelQuarter] = useState<Quarter | null>(null);
   const [selClient, setSelClient] = useState<Client | null>(null);
   const [statements, setStatements] = useState<Statement[]>([]);
+  const [summary, setSummary] = useState<ConsolidationSummary | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
 
   const [showAddAdvisor, setShowAddAdvisor] = useState(false);
   const [addClientFor, setAddClientFor] = useState<Advisor | null>(null);
@@ -67,12 +70,20 @@ export function ClientManagementPage() {
     setOpenYears(next);
   }
 
+  const loadQuarterDetail = useCallback(async (qid: number) => {
+    setStatements(await statementsApi.list(qid));
+    setSummaryLoading(true);
+    try { setSummary(await consolidationApi.quarterSummary(qid)); }
+    catch { setSummary(null); }
+    finally { setSummaryLoading(false); }
+  }, []);
+
   async function selectQuarter(c: Client, q: Quarter) {
     setSelClient(c); setSelQuarter(q);
     setClient(c.id, c.name);
     setQuarter(q.id, q.label);
     unlockNav('parse');
-    setStatements(await statementsApi.list(q.id));
+    await loadQuarterDetail(q.id);
   }
 
   async function refreshClientYears(clientId: number) {
@@ -80,12 +91,54 @@ export function ClientManagementPage() {
     setYearsByClient(prev => ({ ...prev, [clientId]: ys }));
   }
 
+  async function deleteAdvisor(a: Advisor) {
+    const cc = a.client_count ?? 0;
+    const msg = cc > 0
+      ? `Delete advisor "${a.name}" and ALL ${cc} client(s) under them, including every quarter, statement and transaction? This cannot be undone.`
+      : `Delete advisor "${a.name}"?`;
+    if (!confirm(msg)) return;
+    try {
+      await advisorsApi.delete(a.id);
+      // Clear any selection that belonged to this advisor
+      const childIds = new Set((clientsByAdvisor[a.id] || []).map(c => c.id));
+      if (selClient && childIds.has(selClient.id)) { setSelClient(null); setSelQuarter(null); setSummary(null); }
+      setClientsByAdvisor(prev => { const n = { ...prev }; delete n[a.id]; return n; });
+      setOpenAdvisors(prev => { const n = new Set(prev); n.delete(a.id); return n; });
+      await loadAdvisors();
+      showToast('Advisor deleted', 'info');
+    } catch (e) { showToast(e instanceof Error ? e.message : 'Failed to delete advisor', 'error'); }
+  }
+
+  async function deleteClient(a: Advisor, c: Client) {
+    if (!confirm(`Delete client "${c.name}" and ALL of its quarters, statements and transactions? This cannot be undone.`)) return;
+    try {
+      await clientsApi.delete(c.id);
+      if (selClient?.id === c.id) { setSelClient(null); setSelQuarter(null); setSummary(null); }
+      const cs = await clientsApi.list(a.id);
+      setClientsByAdvisor(prev => ({ ...prev, [a.id]: cs }));
+      setYearsByClient(prev => { const n = { ...prev }; delete n[c.id]; return n; });
+      setOpenClients(prev => { const n = new Set(prev); n.delete(c.id); return n; });
+      await loadAdvisors();
+      showToast('Client deleted', 'info');
+    } catch (e) { showToast(e instanceof Error ? e.message : 'Failed to delete client', 'error'); }
+  }
+
+  async function deleteQuarter(c: Client, q: Quarter) {
+    if (!confirm(`Delete quarter "${q.label}" and all its statements and transactions? This cannot be undone.`)) return;
+    try {
+      await quartersApi.delete(q.id);
+      if (selQuarter?.id === q.id) { setSelQuarter(null); setSummary(null); }
+      await refreshClientYears(c.id);
+      showToast('Quarter deleted', 'info');
+    } catch (e) { showToast(e instanceof Error ? e.message : 'Failed to delete quarter', 'error'); }
+  }
+
   function goToParse() { if (selQuarter) setPage('parse'); }
 
   async function deleteStatement(id: number) {
     if (!confirm('Delete this statement and all its transactions?')) return;
     await statementsApi.delete(id).catch(() => {});
-    if (selQuarter) setStatements(await statementsApi.list(selQuarter.id));
+    if (selQuarter) await loadQuarterDetail(selQuarter.id);
     showToast('Statement deleted', 'info');
   }
 
@@ -113,12 +166,14 @@ export function ClientManagementPage() {
             <div key={a.id}>
               <TreeRow depth={0} open={openAdvisors.has(a.id)} onToggle={() => toggleAdvisor(a)}
                 icon="A" label={a.name} sub={a.firm || undefined} badge={a.client_count}
-                actionLabel="+ Client" onAction={() => setAddClientFor(a)} />
+                actionLabel="+ Client" onAction={() => setAddClientFor(a)}
+                onDelete={() => deleteAdvisor(a)} deleteTitle="Delete advisor" />
               {openAdvisors.has(a.id) && (clientsByAdvisor[a.id] || []).map(c => (
                 <div key={c.id}>
                   <TreeRow depth={1} open={openClients.has(c.id)} onToggle={() => toggleClient(c)}
                     icon="C" label={c.name} sub={bizLabel(bizTypes, c.business_type)}
-                    actionLabel="+ Quarter" onAction={() => setAddQuarterFor(c)} />
+                    actionLabel="+ Quarter" onAction={() => setAddQuarterFor(c)}
+                    onDelete={() => deleteClient(a, c)} deleteTitle="Delete client" />
                   {openClients.has(c.id) && (yearsByClient[c.id] || []).map(yg => {
                     const yKey = `${c.id}:${yg.year}`;
                     return (
@@ -126,12 +181,16 @@ export function ClientManagementPage() {
                         <TreeRow depth={2} open={openYears.has(yKey)} onToggle={() => toggleYear(c.id, yg.year)}
                           icon="Y" label={yg.year} badge={yg.quarter_count} />
                         {openYears.has(yKey) && yg.quarters.map(q => (
-                          <div key={q.id} onClick={() => selectQuarter(c, q)}
+                          <div key={q.id} onClick={() => selectQuarter(c, q)} className="tree-leaf"
                             style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', padding: '6px 8px 6px 62px', borderRadius: 7, fontSize: 12.5,
                               background: activeQuarterId === q.id ? 'var(--brand-light)' : 'transparent',
                               color: activeQuarterId === q.id ? 'var(--brand)' : 'var(--text-secondary)',
                               fontWeight: activeQuarterId === q.id ? 700 : 500 }}>
-                            <span style={{ fontSize: 11 }}>-</span>{q.label}
+                            <span style={{ fontSize: 11 }}>-</span>
+                            <span style={{ flex: 1 }}>{q.label}</span>
+                            <button className="tree-del" title="Delete quarter"
+                              onClick={e => { e.stopPropagation(); deleteQuarter(c, q); }}
+                              style={{ border: 'none', background: 'transparent', color: 'var(--red)', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: '0 4px', opacity: .0 }}>×</button>
                           </div>
                         ))}
                         {openYears.has(yKey) && yg.quarters.length === 0 && (
@@ -165,50 +224,63 @@ export function ClientManagementPage() {
             <p className="empty-title">Select a quarter</p>
             <p className="empty-sub">Pick an advisor, client, year, then quarter from the left to see its statements and start the workflow.</p>
           </div>
-        ) : (
+        ) : (() => {
+          const regular = statements.filter(s => s.bank_id !== 'consolidated');
+          const merged = statements.filter(s => s.bank_id === 'consolidated');
+          return (
           <>
             <div className="page-hdr">
               <div className="page-hdr-left">
                 <h1>{selClient?.name} - {selQuarter.label}</h1>
-                <p>{selQuarter.year} - {selQuarter.period_start || '?'} to {selQuarter.period_end || '?'} - {statements.length} statement{statements.length === 1 ? '' : 's'}</p>
+                <p>{selQuarter.year} - {selQuarter.period_start || '?'} to {selQuarter.period_end || '?'} - {regular.length} statement{regular.length === 1 ? '' : 's'}{merged.length ? ` - ${merged.length} merged` : ''}</p>
               </div>
               <div className="page-hdr-right">
                 <button className="btn-primary" onClick={goToParse}>+ Add / Parse Statement</button>
               </div>
             </div>
 
-            {statements.length === 0 ? (
-              <div className="empty-state">
+            {/* Quick GST + P&L summary for the whole quarter */}
+            <QuarterSummaryCards summary={summary} loading={summaryLoading} />
+
+            {/* Regular statements */}
+            <SectionLabel title="Statements" hint="Source bank statements & imports for this quarter" />
+            {regular.length === 0 ? (
+              <div className="empty-state" style={{ padding: '24px 0' }}>
                 <div className="empty-icon">S</div>
                 <p className="empty-title">No statements yet</p>
                 <p className="empty-sub">Click "+ Add / Parse Statement" to upload a PDF or import CSV/Excel for this quarter.</p>
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {statements.map(s => (
-                  <div key={s.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', border: '1px solid var(--border-light)', borderRadius: 'var(--radius)', background: 'var(--surface-card)' }}>
-                    <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--brand)', background: 'var(--brand-light)', padding: '3px 8px', borderRadius: 5 }}>{(s.bank_id || '?').toUpperCase()}</span>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13.5, fontWeight: 600 }}>{s.statement_name || s.filename || `Statement #${s.id}`}</div>
-                      <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>Added {s.created_at?.slice(0, 10) || '-'} - {s.txn_count ?? 0} transactions</div>
-                    </div>
-                    <span className={`badge ${statusBadge(s.status)}`}>{s.status}</span>
-                    <button className="btn-secondary" style={{ fontSize: 12 }} onClick={() => resumeStatement(s)}>Resume</button>
-                    <button className="btn-secondary" style={{ fontSize: 12, color: 'var(--red)', borderColor: 'rgba(239,68,68,.3)' }} onClick={() => deleteStatement(s.id)}>Del</button>
-                  </div>
+                {regular.map(s => (
+                  <StatementRow key={s.id} s={s} onResume={() => resumeStatement(s)} onDelete={() => deleteStatement(s.id)} />
                 ))}
               </div>
             )}
 
-            {statements.length >= 2 && (
-              <div style={{ marginTop: 20, padding: 16, background: 'var(--surface-input)', borderRadius: 'var(--radius)', border: '1px dashed var(--border-default)' }}>
-                <div style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
-                  You have {statements.length} statements in this quarter. Use the <strong>Consolidate</strong> tab to merge them into one combined dataset.
+            {/* Merged / consolidated statements */}
+            {merged.length > 0 && (
+              <>
+                <SectionLabel title="Merged Statements" hint="Combined datasets created from the Consolidate tab" />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {merged.map(s => (
+                    <StatementRow key={s.id} s={s} merged onResume={() => resumeStatement(s)} onDelete={() => deleteStatement(s.id)} />
+                  ))}
                 </div>
+              </>
+            )}
+
+            {regular.length >= 2 && merged.length === 0 && (
+              <div style={{ marginTop: 20, padding: 16, background: 'var(--surface-input)', borderRadius: 'var(--radius)', border: '1px dashed var(--border-default)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                <div style={{ fontSize: 12.5, color: 'var(--text-secondary)' }}>
+                  You have {regular.length} statements in this quarter. Merge them into one combined dataset.
+                </div>
+                <button className="btn-secondary" style={{ fontSize: 12, whiteSpace: 'nowrap' }} onClick={() => setPage('consolidate')}>Open Consolidate →</button>
               </div>
             )}
           </>
-        )}
+          );
+        })()}
       </div>
 
       {showAddAdvisor && <AddAdvisorModal onClose={() => setShowAddAdvisor(false)} onSaved={async () => { setShowAddAdvisor(false); await loadAdvisors(); }} />}
@@ -234,10 +306,11 @@ export function ClientManagementPage() {
   );
 }
 
-function TreeRow({ depth, open, onToggle, icon, label, sub, badge, actionLabel, onAction }: {
+function TreeRow({ depth, open, onToggle, icon, label, sub, badge, actionLabel, onAction, onDelete, deleteTitle }: {
   depth: number; open: boolean; onToggle: () => void;
   icon: string; label: string; sub?: string; badge?: number;
   actionLabel?: string; onAction?: () => void;
+  onDelete?: () => void; deleteTitle?: string;
 }) {
   const padLeft = 8 + depth * 18;
   return (
@@ -255,6 +328,10 @@ function TreeRow({ depth, open, onToggle, icon, label, sub, badge, actionLabel, 
           style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--brand)', background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 4px', whiteSpace: 'nowrap' }}>
           {actionLabel}
         </button>
+      )}
+      {onDelete && (
+        <button className="tree-del" title={deleteTitle || 'Delete'} onClick={e => { e.stopPropagation(); onDelete(); }}
+          style={{ border: 'none', background: 'transparent', color: 'var(--red)', cursor: 'pointer', fontSize: 15, lineHeight: 1, padding: '0 4px', opacity: 0 }}>×</button>
       )}
     </div>
   );
@@ -357,6 +434,68 @@ function AddQuarterModal({ client, onClose, onSaved }: { client: Client; onClose
         <button className="btn-primary" disabled={busy} onClick={save}>{busy ? 'Saving...' : 'Add Quarter'}</button>
       </div>
     </Modal>
+  );
+}
+
+function SectionLabel({ title, hint }: { title: string; hint?: string }) {
+  return (
+    <div style={{ margin: '22px 0 10px' }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>{title}</div>
+      {hint && <div style={{ fontSize: 11.5, color: 'var(--text-muted)', marginTop: 1 }}>{hint}</div>}
+    </div>
+  );
+}
+
+function StatementRow({ s, merged, onResume, onDelete }: { s: Statement; merged?: boolean; onResume: () => void; onDelete: () => void }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px',
+      border: `1px solid ${merged ? 'var(--brand-muted, var(--border-light))' : 'var(--border-light)'}`,
+      borderRadius: 'var(--radius)', background: merged ? 'var(--brand-light)' : 'var(--surface-card)' }}>
+      <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--brand)', background: merged ? 'var(--surface-card)' : 'var(--brand-light)', padding: '3px 8px', borderRadius: 5, whiteSpace: 'nowrap' }}>
+        {merged ? 'MERGED' : (s.bank_id || '?').toUpperCase()}
+      </span>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 13.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.statement_name || s.filename || `Statement #${s.id}`}</div>
+        <div style={{ fontSize: 11.5, color: 'var(--text-muted)' }}>Added {s.created_at?.slice(0, 10) || '-'} - {s.txn_count ?? 0} transactions</div>
+      </div>
+      <span className={`badge ${statusBadge(s.status)}`}>{s.status}</span>
+      <button className="btn-secondary" style={{ fontSize: 12 }} onClick={onResume}>Resume</button>
+      <button className="btn-secondary" style={{ fontSize: 12, color: 'var(--red)', borderColor: 'rgba(239,68,68,.3)' }} onClick={onDelete}>Del</button>
+    </div>
+  );
+}
+
+function QuarterSummaryCards({ summary, loading }: { summary: ConsolidationSummary | null; loading: boolean }) {
+  if (loading) {
+    return <div style={{ fontSize: 12.5, color: 'var(--text-muted)', padding: '4px 0' }}>Loading summary…</div>;
+  }
+  if (!summary || summary.txn_count === 0) return null;
+
+  const bas = summary.consolidated?.gst?.bas || ({} as Record<string, number>);
+  const pnl = summary.consolidated?.pnl || ({} as { gross_net_profit?: number });
+  const gstSales = bas['1A'] || 0;
+  const gstPurch = bas['1B'] || 0;
+  const netGst = gstSales - gstPurch;
+  const netProfit = pnl.gross_net_profit ?? 0;
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12, marginTop: 4 }}>
+      <SumTile label="Statements" val={String(summary.statement_count)} />
+      <SumTile label="Transactions" val={String(summary.txn_count)} />
+      <SumTile label="GST on Sales (1A)" val={fmt(gstSales)} mono />
+      <SumTile label="GST on Purchases (1B)" val={fmt(gstPurch)} mono />
+      <SumTile label={`Net GST ${netGst >= 0 ? 'Payable' : 'Refundable'}`} val={fmt(Math.abs(netGst))} mono color={netGst >= 0 ? 'var(--red)' : 'var(--green)'} />
+      <SumTile label="Net Profit" val={fmt(netProfit)} mono color={netProfit >= 0 ? 'var(--green)' : 'var(--red)'} />
+    </div>
+  );
+}
+
+function SumTile({ label, val, mono, color }: { label: string; val: string; mono?: boolean; color?: string }) {
+  return (
+    <div className="stat-tile">
+      <div className="stat-tile-val" style={{ fontFamily: mono ? 'var(--mono)' : undefined, color, fontSize: 18 }}>{val}</div>
+      <div className="stat-tile-lbl">{label}</div>
+    </div>
   );
 }
 

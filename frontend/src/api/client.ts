@@ -79,6 +79,7 @@ export const clientsApi = {
     post<{ id: number }>('/api/clients', { name, business_type, advisor_id }),
   update: (id: number, body: Partial<Pick<Client, 'name' | 'business_type' | 'advisor_id'>>) =>
     patch<Client>(`/api/clients/${id}`, body),
+  delete: (id: number) => del<{ deleted: number }>(`/api/clients/${id}`),
   years: (clientId: number) => get<YearGroup[]>(`/api/clients/${clientId}/years`),
   businessTypes: () =>
     get<BusinessType[]>('/api/business-types').catch(() => [] as BusinessType[]),
@@ -90,6 +91,7 @@ export const quartersApi = {
     get<Quarter[]>(`/api/quarters?client_id=${clientId}${year ? `&year=${encodeURIComponent(year)}` : ''}`),
   create: (clientId: number, label: string, period_start: string, period_end: string, year?: string) =>
     post<{ id: number; year: string }>('/api/quarters', { client_id: clientId, label, period_start, period_end, year }),
+  delete: (id: number) => del<{ deleted: number }>(`/api/quarters/${id}`),
 };
 
 // ── Statements ───────────────────────────────────────────────────────────

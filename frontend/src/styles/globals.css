@@ -302,3 +302,8 @@ body {
 /* ── Client Management nav tree ── */
 .tree-row { transition: background .1s; }
 .tree-row:hover { background: var(--surface-input); }
+.tree-leaf { transition: background .1s; }
+.tree-leaf:hover { background: var(--surface-input); }
+.tree-row:hover .tree-del,
+.tree-leaf:hover .tree-del { opacity: 1 !important; }
+.tree-del:hover { transform: scale(1.2); }

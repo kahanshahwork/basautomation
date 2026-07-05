@@ -37,32 +37,46 @@ _MAGIC = [
 
 
 def _save(path: str) -> str:
+    """Store an uploaded temp file's token→path in the DATABASE (not per-worker
+    memory), so any gunicorn worker can resolve it. The file itself is already on
+    the shared disk; this just records where it is."""
+    from core.db import get_db
     token = uuid.uuid4().hex
-    with _LOCK:
-        _STORE[token] = {"path": path, "expires": time.time() + _TTL}
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO temp_files (token, path, expires) VALUES (?, ?, ?)",
+        (token, path, time.time() + _TTL),
+    )
+    conn.commit()
     return token
 
 
 def _load(token: str) -> str | None:
-    with _LOCK:
-        e = _STORE.get(token)
-        if not e or time.time() > e["expires"]:
-            if e:
-                del _STORE[token]
-            return None
-        return e["path"]
+    from core.db import get_db
+    conn = get_db()
+    row = conn.execute(
+        "SELECT path, expires FROM temp_files WHERE token = ?", (token,)
+    ).fetchone()
+    if not row or time.time() > row["expires"]:
+        if row:
+            conn.execute("DELETE FROM temp_files WHERE token = ?", (token,))
+            conn.commit()
+        return None
+    return row["path"]
 
 
 def _cleanup():
+    from core.db import get_db
     now = time.time()
-    with _LOCK:
-        dead = [k for k, v in _STORE.items() if now > v["expires"]]
-        for k in dead:
-            try:
-                os.unlink(_STORE[k]["path"])
-            except OSError:
-                pass
-            del _STORE[k]
+    conn = get_db()
+    dead = conn.execute("SELECT token, path FROM temp_files WHERE expires < ?", (now,)).fetchall()
+    for r in dead:
+        try:
+            os.unlink(r["path"])
+        except OSError:
+            pass
+    conn.execute("DELETE FROM temp_files WHERE expires < ?", (now,))
+    conn.commit()
 
 
 def _ext(filename: str) -> str:

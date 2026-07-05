@@ -71,12 +71,21 @@ class _Cursor:
         sql = sql.replace("datetime('now')", "now()")
         return sql
 
+    # Tables whose primary key is NOT a column named "id" — the shim must not
+    # append "RETURNING id" for these (there's no id column to return).
+    _NO_ID_TABLES = ("temp_files",)
+
     def execute(self, sql, params=()):
         sql_t = self._translate(sql)
         low = sql_t.lstrip().lower()
 
-        # Auto-RETURNING id for INSERTs so .lastrowid works like SQLite.
-        want_lastrowid = low.startswith("insert into") and "returning" not in low
+        # Auto-RETURNING id for INSERTs so .lastrowid works like SQLite —
+        # but only for tables that actually have an "id" column.
+        want_lastrowid = (
+            low.startswith("insert into")
+            and "returning" not in low
+            and not any(f"insert into {t}" in low for t in self._NO_ID_TABLES)
+        )
         if want_lastrowid:
             sql_t = sql_t.rstrip().rstrip(";") + " RETURNING id"
 
@@ -293,6 +302,13 @@ CREATE TABLE IF NOT EXISTS annual_consolidations (
     quarter_ids TEXT NOT NULL,
     data        TEXT,
     created_at  TIMESTAMP DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS temp_files (
+    token      TEXT PRIMARY KEY,
+    path       TEXT NOT NULL,
+    expires    DOUBLE PRECISION NOT NULL,
+    created_at TIMESTAMP DEFAULT now()
 );
 """
 
