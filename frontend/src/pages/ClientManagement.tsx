@@ -6,24 +6,23 @@ import { fmt } from '../utils/format';
 import type { Advisor, Client, YearGroup, Quarter, Statement, BusinessType, ConsolidationSummary } from '../types';
 
 /**
- * Client Management — hierarchical sidebar navigation:
- *   Advisor > Client > Year (AU FY) > Quarter
- * Left rail is a collapsible tree; the right pane shows the selected quarter's
- * statements and the entry point into the parse -> approve -> ... workflow.
+ * Client Management — dedicated multi-column sidebar layout (no expandable tree):
+ *   Column 1: Advisors rail        — pick an advisor
+ *   Column 2: Advisor workspace     — that advisor's clients; pick a client to reveal
+ *                                     its FY -> Quarter nav as a flat, sectioned list
+ *   Main:     Quarter detail        — statements, merged statements, quick GST + P&L
  */
 export function ClientManagementPage() {
   const { setClient, setQuarter, setPage, unlockNav, activeQuarterId } = useAppStore();
 
   const [advisors, setAdvisors] = useState<Advisor[]>([]);
-  const [clientsByAdvisor, setClientsByAdvisor] = useState<Record<number, Client[]>>({});
-  const [yearsByClient, setYearsByClient] = useState<Record<number, YearGroup[]>>({});
+  const [clients, setClients] = useState<Client[]>([]);
+  const [years, setYears] = useState<YearGroup[]>([]);
 
-  const [openAdvisors, setOpenAdvisors] = useState<Set<number>>(new Set());
-  const [openClients, setOpenClients] = useState<Set<number>>(new Set());
-  const [openYears, setOpenYears] = useState<Set<string>>(new Set());
-
-  const [selQuarter, setSelQuarter] = useState<Quarter | null>(null);
+  const [selAdvisor, setSelAdvisor] = useState<Advisor | null>(null);
   const [selClient, setSelClient] = useState<Client | null>(null);
+  const [selQuarter, setSelQuarter] = useState<Quarter | null>(null);
+
   const [statements, setStatements] = useState<Statement[]>([]);
   const [summary, setSummary] = useState<ConsolidationSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -37,37 +36,26 @@ export function ClientManagementPage() {
   useEffect(() => { loadAdvisors(); }, [loadAdvisors]);
   useEffect(() => { clientsApi.businessTypes().then(setBizTypes); }, []);
 
-  async function toggleAdvisor(a: Advisor) {
-    const next = new Set(openAdvisors);
-    if (next.has(a.id)) next.delete(a.id);
-    else {
-      next.add(a.id);
-      if (!clientsByAdvisor[a.id]) {
-        const cs = await clientsApi.list(a.id);
-        setClientsByAdvisor(prev => ({ ...prev, [a.id]: cs }));
-      }
-    }
-    setOpenAdvisors(next);
+  // ── Selection cascade ──────────────────────────────────────────────────
+  const loadClients = useCallback(async (advisorId: number) => {
+    setClients(await clientsApi.list(advisorId));
+  }, []);
+
+  const loadYears = useCallback(async (clientId: number) => {
+    setYears(await clientsApi.years(clientId));
+  }, []);
+
+  async function selectAdvisor(a: Advisor) {
+    setSelAdvisor(a);
+    setSelClient(null); setSelQuarter(null); setSummary(null); setStatements([]); setYears([]);
+    await loadClients(a.id);
   }
 
-  async function toggleClient(c: Client) {
-    const next = new Set(openClients);
-    if (next.has(c.id)) next.delete(c.id);
-    else {
-      next.add(c.id);
-      if (!yearsByClient[c.id]) {
-        const ys = await clientsApi.years(c.id);
-        setYearsByClient(prev => ({ ...prev, [c.id]: ys }));
-      }
-    }
-    setOpenClients(next);
-  }
-
-  function toggleYear(clientId: number, year: string) {
-    const key = `${clientId}:${year}`;
-    const next = new Set(openYears);
-    next.has(key) ? next.delete(key) : next.add(key);
-    setOpenYears(next);
+  async function selectClient(c: Client) {
+    setSelClient(c);
+    setSelQuarter(null); setSummary(null); setStatements([]);
+    setClient(c.id, c.name);
+    await loadYears(c.id);
   }
 
   const loadQuarterDetail = useCallback(async (qid: number) => {
@@ -78,19 +66,14 @@ export function ClientManagementPage() {
     finally { setSummaryLoading(false); }
   }, []);
 
-  async function selectQuarter(c: Client, q: Quarter) {
-    setSelClient(c); setSelQuarter(q);
-    setClient(c.id, c.name);
+  async function selectQuarter(q: Quarter) {
+    setSelQuarter(q);
     setQuarter(q.id, q.label);
     unlockNav('parse');
     await loadQuarterDetail(q.id);
   }
 
-  async function refreshClientYears(clientId: number) {
-    const ys = await clientsApi.years(clientId);
-    setYearsByClient(prev => ({ ...prev, [clientId]: ys }));
-  }
-
+  // ── Deletes ────────────────────────────────────────────────────────────
   async function deleteAdvisor(a: Advisor) {
     const cc = a.client_count ?? 0;
     const msg = cc > 0
@@ -99,41 +82,32 @@ export function ClientManagementPage() {
     if (!confirm(msg)) return;
     try {
       await advisorsApi.delete(a.id);
-      // Clear any selection that belonged to this advisor
-      const childIds = new Set((clientsByAdvisor[a.id] || []).map(c => c.id));
-      if (selClient && childIds.has(selClient.id)) { setSelClient(null); setSelQuarter(null); setSummary(null); }
-      setClientsByAdvisor(prev => { const n = { ...prev }; delete n[a.id]; return n; });
-      setOpenAdvisors(prev => { const n = new Set(prev); n.delete(a.id); return n; });
+      if (selAdvisor?.id === a.id) { setSelAdvisor(null); setSelClient(null); setSelQuarter(null); setClients([]); setYears([]); setSummary(null); }
       await loadAdvisors();
       showToast('Advisor deleted', 'info');
     } catch (e) { showToast(e instanceof Error ? e.message : 'Failed to delete advisor', 'error'); }
   }
 
-  async function deleteClient(a: Advisor, c: Client) {
+  async function deleteClient(c: Client) {
     if (!confirm(`Delete client "${c.name}" and ALL of its quarters, statements and transactions? This cannot be undone.`)) return;
     try {
       await clientsApi.delete(c.id);
-      if (selClient?.id === c.id) { setSelClient(null); setSelQuarter(null); setSummary(null); }
-      const cs = await clientsApi.list(a.id);
-      setClientsByAdvisor(prev => ({ ...prev, [a.id]: cs }));
-      setYearsByClient(prev => { const n = { ...prev }; delete n[c.id]; return n; });
-      setOpenClients(prev => { const n = new Set(prev); n.delete(c.id); return n; });
+      if (selClient?.id === c.id) { setSelClient(null); setSelQuarter(null); setYears([]); setSummary(null); }
+      if (selAdvisor) await loadClients(selAdvisor.id);
       await loadAdvisors();
       showToast('Client deleted', 'info');
     } catch (e) { showToast(e instanceof Error ? e.message : 'Failed to delete client', 'error'); }
   }
 
-  async function deleteQuarter(c: Client, q: Quarter) {
+  async function deleteQuarter(q: Quarter) {
     if (!confirm(`Delete quarter "${q.label}" and all its statements and transactions? This cannot be undone.`)) return;
     try {
       await quartersApi.delete(q.id);
-      if (selQuarter?.id === q.id) { setSelQuarter(null); setSummary(null); }
-      await refreshClientYears(c.id);
+      if (selQuarter?.id === q.id) { setSelQuarter(null); setSummary(null); setStatements([]); }
+      if (selClient) await loadYears(selClient.id);
       showToast('Quarter deleted', 'info');
     } catch (e) { showToast(e instanceof Error ? e.message : 'Failed to delete quarter', 'error'); }
   }
-
-  function goToParse() { if (selQuarter) setPage('parse'); }
 
   async function deleteStatement(id: number) {
     if (!confirm('Delete this statement and all its transactions?')) return;
@@ -142,92 +116,113 @@ export function ClientManagementPage() {
     showToast('Statement deleted', 'info');
   }
 
+  function goToParse() { if (selQuarter) setPage('parse'); }
+
   function resumeStatement(s: Statement) {
     useAppStore.getState().setStatement(s.id, s.statement_name || s.filename || `#${s.id}`, s.bank_id);
     unlockNav('approve', 'categorize', 'gst', 'pnl');
     setPage('parse');
   }
 
+  const regular = statements.filter(s => s.bank_id !== 'consolidated');
+  const merged = statements.filter(s => s.bank_id === 'consolidated');
+
   return (
-    <div className="anim-up" style={{ display: 'flex', gap: 0, height: 'calc(100vh - var(--topbar-h) - 40px)' }}>
-      {/* LEFT: Navigation tree */}
-      <div style={{ width: 320, flexShrink: 0, borderRight: '1px solid var(--border-light)', background: 'var(--surface-card)', borderRadius: 'var(--radius-lg) 0 0 var(--radius-lg)', display: 'flex', flexDirection: 'column', overflow: 'hidden', border: '1px solid var(--border-light)' }}>
-        <div style={{ padding: '14px 16px', borderBottom: '1px solid var(--border-light)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span style={{ fontSize: 13, fontWeight: 700 }}>Advisors</span>
-          <button className="btn-primary" style={{ padding: '5px 10px', fontSize: 12 }} onClick={() => setShowAddAdvisor(true)}>+ Advisor</button>
+    <div className="anim-up cm-shell">
+      {/* ── COLUMN 1 — Advisors ─────────────────────────────────────────── */}
+      <aside className="cm-rail cm-rail-advisors">
+        <div className="cm-rail-hdr">
+          <span>Advisors</span>
+          <button className="btn-primary cm-mini-btn" onClick={() => setShowAddAdvisor(true)}>+ Advisor</button>
         </div>
-        <div style={{ flex: 1, overflowY: 'auto', padding: 8 }}>
+        <div className="cm-rail-body">
           {advisors.length === 0 && (
-            <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12.5 }}>
-              No advisors yet. Click <strong>+ Advisor</strong> to begin.
-            </div>
+            <div className="cm-empty-note">No advisors yet. Click <strong>+ Advisor</strong> to begin.</div>
           )}
           {advisors.map(a => (
-            <div key={a.id}>
-              <TreeRow depth={0} open={openAdvisors.has(a.id)} onToggle={() => toggleAdvisor(a)}
-                icon="A" label={a.name} sub={a.firm || undefined} badge={a.client_count}
-                actionLabel="+ Client" onAction={() => setAddClientFor(a)}
-                onDelete={() => deleteAdvisor(a)} deleteTitle="Delete advisor" />
-              {openAdvisors.has(a.id) && (clientsByAdvisor[a.id] || []).map(c => (
+            <div key={a.id} className={`cm-item ${selAdvisor?.id === a.id ? 'active' : ''}`} onClick={() => selectAdvisor(a)}>
+              <span className="cm-avatar">{initials(a.name)}</span>
+              <div className="cm-item-main">
+                <div className="cm-item-title">{a.name}</div>
+                {a.firm && <div className="cm-item-sub">{a.firm}</div>}
+              </div>
+              <span className="cm-count">{a.client_count ?? 0}</span>
+              <button className="cm-del" title="Delete advisor" onClick={e => { e.stopPropagation(); deleteAdvisor(a); }}>×</button>
+            </div>
+          ))}
+        </div>
+      </aside>
+
+      {/* ── COLUMN 2 — Advisor workspace (clients + FY/quarter nav) ──────── */}
+      <aside className="cm-rail cm-rail-nav">
+        {!selAdvisor ? (
+          <div className="cm-rail-placeholder">Select an advisor</div>
+        ) : (
+          <>
+            <div className="cm-rail-hdr">
+              <span>{selAdvisor.name}</span>
+              <button className="btn-primary cm-mini-btn" onClick={() => setAddClientFor(selAdvisor)}>+ Client</button>
+            </div>
+            <div className="cm-rail-body">
+              {/* Clients */}
+              <div className="cm-section-label">Clients</div>
+              {clients.length === 0 && <div className="cm-empty-note">No clients yet — click <strong>+ Client</strong>.</div>}
+              {clients.map(c => (
                 <div key={c.id}>
-                  <TreeRow depth={1} open={openClients.has(c.id)} onToggle={() => toggleClient(c)}
-                    icon="C" label={c.name} sub={bizLabel(bizTypes, c.business_type)}
-                    actionLabel="+ Quarter" onAction={() => setAddQuarterFor(c)}
-                    onDelete={() => deleteClient(a, c)} deleteTitle="Delete client" />
-                  {openClients.has(c.id) && (yearsByClient[c.id] || []).map(yg => {
-                    const yKey = `${c.id}:${yg.year}`;
-                    return (
-                      <div key={yKey}>
-                        <TreeRow depth={2} open={openYears.has(yKey)} onToggle={() => toggleYear(c.id, yg.year)}
-                          icon="Y" label={yg.year} badge={yg.quarter_count} />
-                        {openYears.has(yKey) && yg.quarters.map(q => (
-                          <div key={q.id} onClick={() => selectQuarter(c, q)} className="tree-leaf"
-                            style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', padding: '6px 8px 6px 62px', borderRadius: 7, fontSize: 12.5,
-                              background: activeQuarterId === q.id ? 'var(--brand-light)' : 'transparent',
-                              color: activeQuarterId === q.id ? 'var(--brand)' : 'var(--text-secondary)',
-                              fontWeight: activeQuarterId === q.id ? 700 : 500 }}>
-                            <span style={{ fontSize: 11 }}>-</span>
-                            <span style={{ flex: 1 }}>{q.label}</span>
-                            <button className="tree-del" title="Delete quarter"
-                              onClick={e => { e.stopPropagation(); deleteQuarter(c, q); }}
-                              style={{ border: 'none', background: 'transparent', color: 'var(--red)', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: '0 4px', opacity: .0 }}>×</button>
-                          </div>
-                        ))}
-                        {openYears.has(yKey) && yg.quarters.length === 0 && (
-                          <div style={{ padding: '4px 8px 4px 62px', fontSize: 11.5, color: 'var(--text-muted)' }}>No quarters</div>
-                        )}
+                  <div className={`cm-item cm-item-client ${selClient?.id === c.id ? 'active' : ''}`} onClick={() => selectClient(c)}>
+                    <span className="cm-avatar cm-avatar-sm">{initials(c.name)}</span>
+                    <div className="cm-item-main">
+                      <div className="cm-item-title">{c.name}</div>
+                      <div className="cm-item-sub">{bizLabel(bizTypes, c.business_type)}</div>
+                    </div>
+                    <button className="cm-del" title="Delete client" onClick={e => { e.stopPropagation(); deleteClient(c); }}>×</button>
+                  </div>
+
+                  {/* FY -> Quarter nav appears inline under the selected client */}
+                  {selClient?.id === c.id && (
+                    <div className="cm-fy-block">
+                      <div className="cm-fy-actions">
+                        <button className="cm-link-btn" onClick={() => setAddQuarterFor(c)}>+ Quarter</button>
                       </div>
-                    );
-                  })}
-                  {openClients.has(c.id) && (yearsByClient[c.id] || []).length === 0 && (
-                    <div style={{ padding: '6px 8px 6px 46px', fontSize: 11.5, color: 'var(--text-muted)' }}>
-                      No quarters yet - click <strong>+ Quarter</strong>.
+                      {years.length === 0 && <div className="cm-empty-note cm-indent">No quarters yet — click <strong>+ Quarter</strong>.</div>}
+                      {years.map(yg => (
+                        <div key={yg.year} className="cm-fy-group">
+                          <div className="cm-fy-title">{yg.year} <span className="cm-count cm-count-sm">{yg.quarter_count}</span></div>
+                          {yg.quarters.length === 0 && <div className="cm-empty-note cm-indent">No quarters</div>}
+                          {yg.quarters.map(q => (
+                            <div key={q.id} className={`cm-quarter ${activeQuarterId === q.id ? 'active' : ''}`} onClick={() => selectQuarter(q)}>
+                              <span className="cm-q-dot" />
+                              <span className="cm-q-label">{q.label}</span>
+                              {q.period_start && <span className="cm-q-period">{q.period_start.slice(0, 10)}</span>}
+                              <button className="cm-del" title="Delete quarter" onClick={e => { e.stopPropagation(); deleteQuarter(q); }}>×</button>
+                            </div>
+                          ))}
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
               ))}
-              {openAdvisors.has(a.id) && (clientsByAdvisor[a.id] || []).length === 0 && (
-                <div style={{ padding: '6px 8px 6px 30px', fontSize: 11.5, color: 'var(--text-muted)' }}>
-                  No clients yet - click <strong>+ Client</strong>.
-                </div>
-              )}
             </div>
-          ))}
-        </div>
-      </div>
+          </>
+        )}
+      </aside>
 
-      {/* RIGHT: Detail pane */}
-      <div style={{ flex: 1, background: 'var(--surface-card)', borderRadius: '0 var(--radius-lg) var(--radius-lg) 0', border: '1px solid var(--border-light)', borderLeft: 'none', overflowY: 'auto', padding: 24 }}>
+      {/* ── MAIN — Quarter detail ───────────────────────────────────────── */}
+      <div className="cm-detail">
         {!selQuarter ? (
           <div className="empty-state" style={{ height: '100%' }}>
             <div className="empty-icon">CM</div>
-            <p className="empty-title">Select a quarter</p>
-            <p className="empty-sub">Pick an advisor, client, year, then quarter from the left to see its statements and start the workflow.</p>
+            <p className="empty-title">{!selAdvisor ? 'Pick an advisor to begin' : !selClient ? 'Pick a client' : 'Select a quarter'}</p>
+            <p className="empty-sub">
+              {!selAdvisor
+                ? 'Choose an advisor on the far left, then a client, then a quarter.'
+                : !selClient
+                ? 'Choose a client from the list, then open a financial-year quarter.'
+                : 'Open a quarter to see its statements, merged datasets and a live GST / P&L summary.'}
+            </p>
           </div>
-        ) : (() => {
-          const regular = statements.filter(s => s.bank_id !== 'consolidated');
-          const merged = statements.filter(s => s.bank_id === 'consolidated');
-          return (
+        ) : (
           <>
             <div className="page-hdr">
               <div className="page-hdr-left">
@@ -279,8 +274,7 @@ export function ClientManagementPage() {
               </div>
             )}
           </>
-          );
-        })()}
+        )}
       </div>
 
       {showAddAdvisor && <AddAdvisorModal onClose={() => setShowAddAdvisor(false)} onSaved={async () => { setShowAddAdvisor(false); await loadAdvisors(); }} />}
@@ -288,9 +282,7 @@ export function ClientManagementPage() {
         <AddClientModal advisor={addClientFor} bizTypes={bizTypes} onClose={() => setAddClientFor(null)}
           onSaved={async () => {
             const a = addClientFor; setAddClientFor(null);
-            const cs = await clientsApi.list(a.id);
-            setClientsByAdvisor(prev => ({ ...prev, [a.id]: cs }));
-            setOpenAdvisors(prev => new Set(prev).add(a.id));
+            if (selAdvisor?.id === a.id) await loadClients(a.id);
             await loadAdvisors();
           }} />
       )}
@@ -298,45 +290,14 @@ export function ClientManagementPage() {
         <AddQuarterModal client={addQuarterFor} onClose={() => setAddQuarterFor(null)}
           onSaved={async () => {
             const c = addQuarterFor; setAddQuarterFor(null);
-            await refreshClientYears(c.id);
-            setOpenClients(prev => new Set(prev).add(c.id));
+            if (selClient?.id === c.id) await loadYears(c.id);
           }} />
       )}
     </div>
   );
 }
 
-function TreeRow({ depth, open, onToggle, icon, label, sub, badge, actionLabel, onAction, onDelete, deleteTitle }: {
-  depth: number; open: boolean; onToggle: () => void;
-  icon: string; label: string; sub?: string; badge?: number;
-  actionLabel?: string; onAction?: () => void;
-  onDelete?: () => void; deleteTitle?: string;
-}) {
-  const padLeft = 8 + depth * 18;
-  return (
-    <div onClick={onToggle} className="tree-row"
-      style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', padding: `7px 8px 7px ${padLeft}px`, borderRadius: 7 }}>
-      <span style={{ fontSize: 10, color: 'var(--text-muted)', width: 10 }}>{open ? 'v' : '>'}</span>
-      <span style={{ fontSize: 10, fontWeight: 800, color: 'var(--brand)', background: 'var(--brand-light)', borderRadius: 4, padding: '1px 5px' }}>{icon}</span>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</div>
-        {sub && <div style={{ fontSize: 10.5, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{sub}</div>}
-      </div>
-      {badge != null && <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', background: 'var(--surface-input)', padding: '1px 6px', borderRadius: 9 }}>{badge}</span>}
-      {actionLabel && onAction && (
-        <button onClick={e => { e.stopPropagation(); onAction(); }}
-          style={{ fontSize: 10.5, fontWeight: 600, color: 'var(--brand)', background: 'transparent', border: 'none', cursor: 'pointer', padding: '2px 4px', whiteSpace: 'nowrap' }}>
-          {actionLabel}
-        </button>
-      )}
-      {onDelete && (
-        <button className="tree-del" title={deleteTitle || 'Delete'} onClick={e => { e.stopPropagation(); onDelete(); }}
-          style={{ border: 'none', background: 'transparent', color: 'var(--red)', cursor: 'pointer', fontSize: 15, lineHeight: 1, padding: '0 4px', opacity: 0 }}>×</button>
-      )}
-    </div>
-  );
-}
-
+// ── Modals ──────────────────────────────────────────────────────────────
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
   return (
     <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -437,6 +398,7 @@ function AddQuarterModal({ client, onClose, onSaved }: { client: Client; onClose
   );
 }
 
+// ── Detail-pane helpers ───────────────────────────────────────────────────
 function SectionLabel({ title, hint }: { title: string; hint?: string }) {
   return (
     <div style={{ margin: '22px 0 10px' }}>
@@ -499,6 +461,12 @@ function SumTile({ label, val, mono, color }: { label: string; val: string; mono
   );
 }
 
+function initials(name: string): string {
+  const parts = (name || '').trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
 function bizLabel(types: BusinessType[], code: string): string {
   return types.find(t => t.code === code)?.label || code;
 }

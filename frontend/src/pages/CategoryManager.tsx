@@ -29,14 +29,6 @@ export function CategoryManagerPage() {
 
   useEffect(() => { loadAll(); }, []);
 
-  async function mergeInto(fromId: number, intoId: number, fromName: string, intoName: string) {
-    if (!confirm(`Merge "${fromName}" into "${intoName}"?\n\nAll transactions and vendor memory from "${fromName}" move to "${intoName}", then "${fromName}" is deleted.`)) return;
-    const r = await categoryApi.merge(fromId, intoId);
-    if (r.error) { showToast(r.error, 'error'); return; }
-    showToast(`Merged into "${r.kept}" — moved ${r.moved_transactions} txns, ${r.moved_vendor_memory} patterns`, 'success');
-    loadAll();
-  }
-
   async function deleteDupe(id: number, name: string) {
     if (!confirm(`Delete the imported category "${name}"? (Only allowed if no transactions use it — otherwise it's deactivated.)`)) return;
     await categoryApi.delete(id);
@@ -132,10 +124,7 @@ export function CategoryManagerPage() {
                           {m.category.is_new ? <span className="badge badge-amber" style={{ marginLeft: 6, fontSize: 9 }}>NEW</span> : <span className="badge badge-gray" style={{ marginLeft: 6, fontSize: 9 }}>existing</span>}
                           <span style={{ fontSize: 11, color: 'var(--text-muted)', marginLeft: 8 }}>shared: {m.shared_words.join(', ')}</span>
                         </div>
-                        <button className="btn-primary" style={{ fontSize: 11.5, padding: '5px 12px' }}
-                          onClick={() => mergeInto(pair.new_category.id, m.category.id, pair.new_category.name, m.category.name)}>
-                          Merge into this →
-                        </button>
+                        <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>use ⇄ Merge in the table below to combine</span>
                       </div>
                     ))}
                   </div>
@@ -204,9 +193,7 @@ export function CategoryManagerPage() {
                     </td>
                     <td>
                       <div style={{ display:'flex', gap:4, justifyContent:'flex-end' }}>
-                        {c.is_new ? (
-                          <button className="btn-ghost" style={{fontSize:11.5,color:'var(--purple, #7C3AED)',padding:'4px 8px',fontWeight:600}} onClick={()=>setMergeSource(c)}>⇄ Merge</button>
-                        ) : null}
+                        <button className="btn-ghost" style={{fontSize:11.5,color:'var(--brand)',padding:'4px 8px',fontWeight:600}} onClick={()=>setMergeSource(c)} title="Merge other categories into this one">⇄ Merge</button>
                         <button className="btn-ghost" style={{fontSize:12,color:'var(--red)',padding:'4px 8px'}} onClick={()=>handleDelete(c.id)}>🗑</button>
                       </div>
                     </td>
@@ -260,88 +247,90 @@ export function CategoryManagerPage() {
   );
 }
 
-// ── Manual merge modal: merge a NEW imported category into any other category ──
+// ── Merge modal: the clicked category (keeper) absorbs one or more others ──
 function MergeModal({ source, allCats, onClose, onMerged }: {
-  source: Category;
-  allCats: Category[];
+  source: Category;         // the KEEPER — everything gets merged INTO this
+  allCats: Category[];      // candidate categories to absorb (already excludes source)
   onClose: () => void;
   onMerged: () => void;
 }) {
   const [search, setSearch] = useState('');
-  const [targetId, setTargetId] = useState<number | null>(null);
-  const [keep, setKeep] = useState<'target' | 'source'>('target');
+  const [picked, setPicked] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState(false);
 
-  const target = allCats.find(c => c.id === targetId) || null;
   const filtered = allCats.filter(c =>
     !search || c.name.toLowerCase().includes(search.toLowerCase()) || c.code.toLowerCase().includes(search.toLowerCase())
   );
+  const pickedCats = allCats.filter(c => picked.has(c.id));
+
+  function toggle(id: number) {
+    setPicked(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  }
 
   async function doMerge() {
-    if (!target) { showToast('Pick a category to merge with', 'error'); return; }
-    // "keep" decides direction: everything moves INTO the kept category, the other is deleted.
-    const intoId = keep === 'target' ? target.id : source.id;
-    const fromId = keep === 'target' ? source.id : target.id;
-    const keptName = keep === 'target' ? target.name : source.name;
-    const goneName = keep === 'target' ? source.name : target.name;
-    if (!confirm(`Merge "${goneName}" into "${keptName}"?\n\nAll transactions and vendor-memory patterns from "${goneName}" move to "${keptName}", then "${goneName}" is deleted.`)) return;
+    if (picked.size === 0) { showToast('Pick at least one category to merge in', 'error'); return; }
+    const names = pickedCats.map(c => `"${c.name}"`).join(', ');
+    if (!confirm(`Merge ${names} into "${source.name}"?\n\nAll transactions and vendor-memory patterns from ${picked.size === 1 ? 'that category' : 'those categories'} move to "${source.name}", then ${picked.size === 1 ? 'it is' : 'they are'} deleted.\n\nFuture bank statements whose transactions used to match ${picked.size === 1 ? 'it' : 'them'} will now be suggested as "${source.name}".`)) return;
     setBusy(true);
+    let movedTxns = 0, movedVm = 0, ok = 0;
     try {
-      const r = await categoryApi.merge(fromId, intoId);
-      if (r.error) throw new Error(r.error);
-      showToast(`Merged into "${r.kept}" — moved ${r.moved_transactions} txns, ${r.moved_vendor_memory} patterns`, 'success');
-      onMerged();
+      // Merge each picked category INTO the keeper (source). Sequential to keep vendor-memory
+      // repointing deterministic and avoid UNIQUE(client_id, pattern) races.
+      for (const c of pickedCats) {
+        const r = await categoryApi.merge(c.id, source.id);
+        if (r.error) { showToast(`"${c.name}": ${r.error}`, 'error'); continue; }
+        movedTxns += r.moved_transactions || 0;
+        movedVm += r.moved_vendor_memory || 0;
+        ok += 1;
+      }
+      if (ok > 0) {
+        showToast(`Merged ${ok} categor${ok === 1 ? 'y' : 'ies'} into "${source.name}" — moved ${movedTxns} txns, ${movedVm} patterns`, 'success');
+        onMerged();
+      }
     } catch (e) { showToast(e instanceof Error ? e.message : 'Merge failed', 'error'); }
     finally { setBusy(false); }
   }
 
   return (
     <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="modal-box" style={{ maxWidth: 520 }}>
-        <h3>Merge Category</h3>
+      <div className="modal-box" style={{ maxWidth: 540 }}>
+        <h3>Merge into “{source.name}”</h3>
         <p className="modal-sub">
-          Merge the imported category <strong>{source.name}</strong> <span className="badge badge-amber" style={{ fontSize: 9 }}>NEW</span> with an existing one. Pick any category — they don't have to be flagged as duplicates.
+          Pick one or more categories to fold <strong>into</strong> <strong>{source.name}</strong>.
+          Their transactions and learned vendor-memory patterns move to {source.name}, then they're removed.
+          Any category can absorb several others this way.
         </p>
 
         <div className="field">
-          <label className="vw-label">Merge with</label>
+          <label className="vw-label">Categories to merge in {picked.size > 0 ? `(${picked.size} selected)` : ''}</label>
           <input className="vw-input" placeholder="Search categories…" value={search} onChange={e => setSearch(e.target.value)} autoFocus />
-          <div style={{ maxHeight: 220, overflowY: 'auto', marginTop: 8, border: '1px solid var(--border-light)', borderRadius: 8 }}>
+          <div style={{ maxHeight: 260, overflowY: 'auto', marginTop: 8, border: '1px solid var(--border-light)', borderRadius: 8 }}>
             {filtered.length === 0 && <div style={{ padding: 12, fontSize: 12.5, color: 'var(--text-muted)' }}>No matches.</div>}
             {filtered.map(c => (
-              <div key={c.id} onClick={() => setTargetId(c.id)}
-                style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', cursor: 'pointer',
-                  background: targetId === c.id ? 'var(--brand-light)' : 'transparent',
+              <label key={c.id}
+                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', cursor: 'pointer',
+                  background: picked.has(c.id) ? 'var(--brand-light)' : 'transparent',
                   borderBottom: '1px solid var(--border-light)' }}>
-                <span style={{ fontSize: 13, fontWeight: 600, color: targetId === c.id ? 'var(--brand)' : 'var(--text-primary)' }}>{c.name}</span>
+                <input type="checkbox" checked={picked.has(c.id)} onChange={() => toggle(c.id)} />
+                <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: picked.has(c.id) ? 'var(--brand)' : 'var(--text-primary)' }}>{c.name}</span>
                 {c.is_new ? <span className="badge badge-amber" style={{ fontSize: 9 }}>NEW</span> : <span className="badge badge-gray" style={{ fontSize: 9 }}>{c.pnl_group}</span>}
                 {c.bas_label ? <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>· {c.bas_label}</span> : null}
-              </div>
+              </label>
             ))}
           </div>
         </div>
 
-        {target && (
-          <div className="field">
-            <label className="vw-label">Which one to keep?</label>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 4 }}>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderRadius: 8, cursor: 'pointer',
-                border: `1px solid ${keep === 'target' ? 'var(--brand)' : 'var(--border-light)'}`, background: keep === 'target' ? 'var(--brand-light)' : 'var(--surface-card)' }}>
-                <input type="radio" checked={keep === 'target'} onChange={() => setKeep('target')} />
-                <span style={{ fontSize: 13 }}>Keep <strong>{target.name}</strong>{target.is_new ? '' : ' (existing)'} — delete “{source.name}”</span>
-              </label>
-              <label style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 12px', borderRadius: 8, cursor: 'pointer',
-                border: `1px solid ${keep === 'source' ? 'var(--brand)' : 'var(--border-light)'}`, background: keep === 'source' ? 'var(--brand-light)' : 'var(--surface-card)' }}>
-                <input type="radio" checked={keep === 'source'} onChange={() => setKeep('source')} />
-                <span style={{ fontSize: 13 }}>Keep <strong>{source.name}</strong> (imported) — delete “{target.name}”</span>
-              </label>
-            </div>
+        {picked.size > 0 && (
+          <div style={{ fontSize: 12, color: 'var(--text-secondary)', background: 'var(--surface-input)', borderRadius: 8, padding: '10px 12px', marginTop: 4 }}>
+            Keeping <strong>{source.name}</strong>. Removing after merge: {pickedCats.map(c => c.name).join(', ')}.
           </div>
         )}
 
         <div className="modal-footer">
           <button className="btn-secondary" onClick={onClose}>Cancel</button>
-          <button className="btn-primary" disabled={busy || !target} onClick={doMerge}>{busy ? 'Merging…' : 'Merge'}</button>
+          <button className="btn-primary" disabled={busy || picked.size === 0} onClick={doMerge}>
+            {busy ? 'Merging…' : `Merge ${picked.size || ''} into ${source.name}`}
+          </button>
         </div>
       </div>
     </div>
