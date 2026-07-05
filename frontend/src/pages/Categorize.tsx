@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useAppStore } from '../store/appStore';
 import { statementsApi, categoryApi, categorizeApi } from '../api/client';
 import { showToast } from '../components/ui/Toast';
@@ -26,6 +26,12 @@ export function CategorizePage() {
   const [txns, setTxns]           = useState<Transaction[]>([]);
   const [cats, setCats]           = useState<Category[]>([]);
   const [suggestions, setSugg]    = useState<Record<number, number>>({});
+  // The ORIGINAL vendor-memory suggestion per txn, kept even after the row is
+  // categorized, so we can tell whether the chosen category still matches it.
+  const [origSugg, setOrigSugg]   = useState<Record<number, number>>({});
+  // Rows where the user saved a DIFFERENT category to vendor memory than what was
+  // originally suggested → label reads "suggested category changed".
+  const [vmChanged, setVmChanged] = useState<Record<number, boolean>>({});
   const [grouped, setGrouped]     = useState(false);
   const [suggestedOnly, setSuggestedOnly] = useState(false);
   const [groups, setGroups]       = useState<{ credit: TxnGroup[]; debit: TxnGroup[] }>({ credit: [], debit: [] });
@@ -53,6 +59,10 @@ export function CategorizePage() {
       const sg: Record<number, number> = {};
       Object.entries(s).forEach(([k, v]) => { sg[Number(k)] = v as number; });
       setSugg(sg);
+      // Snapshot the original suggestions once, so we can keep showing them even
+      // after a row is categorized (to detect "chose something else").
+      setOrigSugg(sg);
+      setVmChanged({});
     } finally { setLoading(false); }
   }, [activeStatementId]);
 
@@ -88,7 +98,12 @@ export function CategorizePage() {
   async function categorize(id: number, catId: number | null) {
     if (!activeStatementId) return;
     setTxns(prev => prev.map(t => t.id === id ? { ...t, category_id: catId } : t));
+    // Clear the "pending" suggestion prompt for this row (origSugg is kept so the
+    // Suggestion column can still compare against the original recommendation).
     setSugg(prev => { const n = { ...prev }; delete n[id]; return n; });
+    // Changing the category means any earlier "suggested category changed" note is
+    // no longer confirmed until the user saves the new choice to VM again.
+    setVmChanged(prev => { if (!prev[id]) return prev; const n = { ...prev }; delete n[id]; return n; });
     // if this row already had VM saved, changing category makes it stale
     setVmState(prev => ({ ...prev, [id]: prev[id] === 'saved' ? 'stale' : (catId ? prev[id] || 'none' : 'none') }));
     try {
@@ -101,6 +116,8 @@ export function CategorizePage() {
   }
   function rejectSuggestion(id: number) {
     setSugg(prev => { const n = { ...prev }; delete n[id]; return n; });
+    // Fully dismiss: don't keep re-surfacing this suggestion for the row.
+    setOrigSugg(prev => { const n = { ...prev }; delete n[id]; return n; });
   }
 
   // Apply every current vendor-memory suggestion in one action.
@@ -131,7 +148,18 @@ export function CategorizePage() {
     try {
       await categorizeApi.updateVendorMemory(activeStatementId, id);
       setVmState(prev => ({ ...prev, [id]: 'saved' }));
-      showToast('Added to vendor memory', 'success');
+      const chosen = txns.find(t => t.id === id)?.category_id ?? null;
+      const original = origSugg[id];
+      // If the user saved a category that differs from the ORIGINAL suggestion,
+      // the vendor's remembered category has now changed → flag it, and adopt the
+      // new choice as the current suggestion baseline.
+      if (chosen != null && original != null && chosen !== original) {
+        setVmChanged(prev => ({ ...prev, [id]: true }));
+        setOrigSugg(prev => ({ ...prev, [id]: chosen }));
+        showToast('Suggested category changed for this vendor', 'success');
+      } else {
+        showToast('Added to vendor memory', 'success');
+      }
     } catch (e) { showToast(e instanceof Error ? e.message : 'VM update failed', 'error'); }
   }
 
@@ -177,11 +205,6 @@ export function CategorizePage() {
       <p className="empty-sub">Select a statement and approve it first.</p>
     </div>
   );
-
-  const selectStyle: React.CSSProperties = {
-    border:'1px solid var(--border-light)', borderRadius:6, padding:'4px 6px',
-    fontSize:12, background:'var(--surface-card)', color:'var(--text-primary)', maxWidth:200,
-  };
 
   return (
     <div className="anim-up">
@@ -232,7 +255,11 @@ export function CategorizePage() {
               <tbody>
                 {txns.filter(t => !suggestedOnly || (t.id != null && suggestions[t.id] && !t.category_id)).map(t => {
                   const isCr = t.amount >= 0;
-                  const sugId = !t.category_id ? suggestions[t.id!] : undefined;
+                  const orig = t.id != null ? origSugg[t.id] : undefined;          // baseline suggestion (kept alive)
+                  const pending = !t.category_id ? suggestions[t.id!] : undefined; // active accept/reject prompt
+                  const changed = t.id != null ? vmChanged[t.id] : false;          // saved a different cat to VM
+                  // Suggestion still relevant but the row was set to a DIFFERENT category → re-surface it.
+                  const mismatch = t.category_id != null && orig != null && t.category_id !== orig && !changed;
                   const vm = t.id != null ? vmState[t.id] : undefined;
                   return (
                     <tr key={t.id}>
@@ -240,13 +267,27 @@ export function CategorizePage() {
                       <td title={t.description}>{t.description}</td>
                       <td className={`mono ${isCr?'pos':'neg'}`} style={{ textAlign:'right' }}>{fmt(t.amount)}</td>
                       <td>
-                        {sugId ? (
+                        {changed ? (
+                          <span style={{ fontSize:10.5, fontWeight:700, padding:'3px 7px', borderRadius:5, background:'rgba(16,185,129,.1)', color:'var(--green)', width:'fit-content', display:'inline-block' }}>
+                            ✓ suggested category changed
+                          </span>
+                        ) : pending ? (
                           <div style={{ display:'flex', flexDirection:'column', gap:3 }}>
                             <span style={{ fontSize:10, fontWeight:700, padding:'2px 6px', borderRadius:5, background:'rgba(124,58,237,.1)', color:'var(--purple)', width:'fit-content' }}>
-                              🧠 {catById[sugId]?.name ?? '?'}
+                              🧠 {catById[pending]?.name ?? '?'}
                             </span>
                             <div style={{ display:'flex', gap:4 }}>
-                              <button className="btn-primary" style={{ padding:'2px 8px', fontSize:10 }} onClick={() => acceptSuggestion(t.id!, sugId)}>✓ Accept</button>
+                              <button className="btn-primary" style={{ padding:'2px 8px', fontSize:10 }} onClick={() => acceptSuggestion(t.id!, pending)}>✓ Accept</button>
+                              <button className="btn-ghost" style={{ padding:'2px 6px', fontSize:10 }} onClick={() => rejectSuggestion(t.id!)}>✕</button>
+                            </div>
+                          </div>
+                        ) : mismatch ? (
+                          <div style={{ display:'flex', flexDirection:'column', gap:3 }}>
+                            <span style={{ fontSize:10, fontWeight:700, padding:'2px 6px', borderRadius:5, background:'rgba(124,58,237,.1)', color:'var(--purple)', width:'fit-content' }}>
+                              🧠 {catById[orig!]?.name ?? '?'} <span style={{ fontWeight:500, opacity:.8 }}>(suggested)</span>
+                            </span>
+                            <div style={{ display:'flex', gap:4 }}>
+                              <button className="btn-primary" style={{ padding:'2px 8px', fontSize:10 }} onClick={() => acceptSuggestion(t.id!, orig!)}>✓ Use suggested</button>
                               <button className="btn-ghost" style={{ padding:'2px 6px', fontSize:10 }} onClick={() => rejectSuggestion(t.id!)}>✕</button>
                             </div>
                           </div>
@@ -259,11 +300,13 @@ export function CategorizePage() {
                       <td>
                         <div style={{ display:'flex', alignItems:'center', gap:6, flexWrap:'nowrap' }}>
                           <span className={`badge ${isCr?'badge-green':'badge-red'}`} style={{ flexShrink:0 }}>{isCr?'CR':'DR'}</span>
-                          <select style={{ ...selectStyle, flex:1, minWidth:0 }} value={t.category_id ?? ''}
-                            onChange={e => categorize(t.id!, e.target.value ? Number(e.target.value) : null)}>
-                            <option value="">— Uncategorized —</option>
-                            {optsFor(isCr?'CR':'DR').map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                          </select>
+                          <SearchableSelect
+                            value={t.category_id ?? null}
+                            options={optsFor(isCr?'CR':'DR').map(c => ({ id: c.id, name: c.name }))}
+                            placeholder="— Uncategorized —"
+                            onChange={(id) => categorize(t.id!, id)}
+                            minWidth={0} maxWidth={200}
+                          />
                         </div>
                       </td>
                       <td style={{ textAlign:'center' }}>
@@ -311,12 +354,15 @@ export function CategorizePage() {
                   <span style={{ flex:1, fontSize:13, fontWeight:700 }}>{g.group_key}</span>
                   <span style={{ fontSize:11, color:'var(--text-muted)', whiteSpace:'nowrap' }}>{doneCnt}/{g.transactions.length} done · {fmt(g.total)}</span>
                   {allDone && <span className="badge badge-green">✓ ALL DONE</span>}
-                  <select style={{ ...selectStyle, minWidth:170 }} value={g.dominant_category_id ?? ''}
-                    onClick={e => e.stopPropagation()}
-                    onChange={e => categorizeGroupAll(g, e.target.value ? Number(e.target.value) : null)}>
-                    <option value="">— Set whole group —</option>
-                    {opts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
+                  <div onClick={e => e.stopPropagation()} style={{ minWidth:170 }}>
+                    <SearchableSelect
+                      value={g.dominant_category_id ?? null}
+                      options={opts.map(c => ({ id: c.id, name: c.name }))}
+                      placeholder="— Set whole group —"
+                      onChange={(id) => categorizeGroupAll(g, id)}
+                      minWidth={170} maxWidth={240}
+                    />
+                  </div>
                 </div>
                 {isOpen && (
                   <div className="vw-table-wrap">
@@ -329,11 +375,13 @@ export function CategorizePage() {
                             <td title={t.description}>{t.description}</td>
                             <td className={`mono ${t.amount>0?'pos':'neg'}`} style={{ textAlign:'right' }}>{fmt(t.amount)}</td>
                             <td>
-                              <select style={selectStyle} value={t.category_id ?? ''}
-                                onChange={e => categorizeInGroup(t.id, e.target.value ? Number(e.target.value) : null, key)}>
-                                <option value="">— Uncategorized —</option>
-                                {opts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                              </select>
+                              <SearchableSelect
+                                value={t.category_id ?? null}
+                                options={opts.map(c => ({ id: c.id, name: c.name }))}
+                                placeholder="— Uncategorized —"
+                                onChange={(id) => categorizeInGroup(t.id, id, key)}
+                                minWidth={0} maxWidth={220}
+                              />
                             </td>
                           </tr>
                         ))}
@@ -347,6 +395,124 @@ export function CategorizePage() {
           {!groups.credit.length && !groups.debit.length && !loading && (
             <div className="empty-state"><p className="empty-sub">No transaction groups found.</p></div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Searchable category dropdown ──────────────────────────────────────────
+// Drop-in replacement for the native <select> used to pick a category. When
+// opened, a search box appears and is auto-focused immediately, so the user can
+// start typing to filter without clicking into it first.
+interface SSOption { id: number; name: string; }
+function SearchableSelect({
+  value, options, placeholder, onChange, minWidth = 170, maxWidth = 220, onOpen,
+}: {
+  value: number | null;
+  options: SSOption[];
+  placeholder: string;
+  onChange: (id: number | null) => void;
+  minWidth?: number;
+  maxWidth?: number;
+  onOpen?: () => void;   // e.g. stopPropagation for group headers
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [hi, setHi] = useState(0);           // highlighted index for keyboard nav
+  const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const selected = options.find(o => o.id === value) || null;
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter(o => o.name.toLowerCase().includes(q));
+  }, [query, options]);
+
+  // Auto-focus the search box the moment the dropdown opens.
+  useEffect(() => {
+    if (open) {
+      setQuery(''); setHi(0);
+      // focus on next frame so the input is mounted
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [open]);
+
+  // Close on outside click.
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [open]);
+
+  function choose(id: number | null) {
+    onChange(id);
+    setOpen(false);
+  }
+
+  function onKey(e: React.KeyboardEvent) {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setHi(h => Math.min(h + 1, filtered.length - 1)); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setHi(h => Math.max(h - 1, 0)); }
+    else if (e.key === 'Enter') { e.preventDefault(); const o = filtered[hi]; if (o) choose(o.id); }
+    else if (e.key === 'Escape') { setOpen(false); }
+  }
+
+  return (
+    <div ref={rootRef} style={{ position: 'relative', minWidth, maxWidth, width: '100%' }}
+      onClick={e => { if (onOpen) e.stopPropagation(); }}>
+      <button type="button"
+        onClick={e => { if (onOpen) { e.stopPropagation(); onOpen(); } setOpen(o => !o); }}
+        style={{
+          width: '100%', textAlign: 'left', cursor: 'pointer',
+          border: '1px solid var(--border-light)', borderRadius: 6, padding: '4px 24px 4px 8px',
+          fontSize: 12, background: 'var(--surface-card)',
+          color: selected ? 'var(--text-primary)' : 'var(--text-muted)',
+          whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', position: 'relative',
+        }}>
+        {selected ? selected.name : placeholder}
+        <span style={{ position: 'absolute', right: 8, top: '50%', transform: 'translateY(-50%)', fontSize: 9, color: 'var(--text-muted)' }}>▼</span>
+      </button>
+
+      {open && (
+        <div style={{
+          position: 'absolute', top: 'calc(100% + 2px)', left: 0, zIndex: 50,
+          minWidth: Math.max(minWidth, 220), width: 'max-content', maxWidth: 320,
+          background: 'var(--surface-card)', border: '1px solid var(--border-default)',
+          borderRadius: 8, boxShadow: 'var(--shadow-hover, 0 8px 24px rgba(0,0,0,.12))', overflow: 'hidden',
+        }}>
+          <div style={{ padding: 6, borderBottom: '1px solid var(--border-light)' }}>
+            <input ref={inputRef} value={query} onChange={e => { setQuery(e.target.value); setHi(0); }}
+              onKeyDown={onKey} placeholder="Search categories…"
+              style={{ width: '100%', border: '1px solid var(--border-light)', borderRadius: 6, padding: '5px 8px', fontSize: 12, background: 'var(--surface-input)', color: 'var(--text-primary)', outline: 'none' }} />
+          </div>
+          <div style={{ maxHeight: 240, overflowY: 'auto', padding: 4 }}>
+            {/* Empty / clear option */}
+            <div onClick={() => choose(null)}
+              style={{ padding: '6px 10px', fontSize: 12, cursor: 'pointer', borderRadius: 6, color: 'var(--text-muted)' }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--surface-input)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
+              {placeholder}
+            </div>
+            {filtered.length === 0 && (
+              <div style={{ padding: '8px 10px', fontSize: 12, color: 'var(--text-muted)' }}>No matches</div>
+            )}
+            {filtered.map((o, i) => (
+              <div key={o.id} onClick={() => choose(o.id)} onMouseEnter={() => setHi(i)}
+                style={{
+                  padding: '6px 10px', fontSize: 12.5, cursor: 'pointer', borderRadius: 6,
+                  background: i === hi ? 'var(--brand-light)' : (o.id === value ? 'var(--surface-input)' : 'transparent'),
+                  color: o.id === value ? 'var(--brand)' : 'var(--text-primary)',
+                  fontWeight: o.id === value ? 700 : 500,
+                }}>
+                {o.name}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
