@@ -271,7 +271,12 @@ export function UploadParsePage() {
       setTmpToken(d.tmp_token);
       if(d.bank_id && d.confidence>=0.5) { setDetectedBank(d.bank_id); setDetectInfo(d); }
       else setDetectInfo({...d,bank_id:null});
-    } catch { setDetectInfo(null); }
+    } catch(e) {
+      // Don't leave the UI stuck on "Detecting…". Show a real error and let the
+      // user still pick a bank manually and parse.
+      setDetectInfo({ bank_id:null, display_name:'', confidence:0, tmp_token:'' });
+      setParseError(`Detection failed: ${(e as Error).message}. You can still select a bank manually below and parse.`);
+    }
   }
 
   function handleRemoveFile() {

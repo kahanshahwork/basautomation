@@ -61,7 +61,7 @@ class _Cursor:
 
     # Tables whose primary key is NOT a column called `id`. INSERTs into these
     # must NOT get an auto-appended `RETURNING id` (there is no id column).
-    _NO_ID_TABLES = ("sessions",)
+    _NO_ID_TABLES = ("sessions", "temp_files")
 
     def __init__(self, raw):
         self._raw = raw
@@ -320,6 +320,12 @@ CREATE TABLE IF NOT EXISTS sessions (
     user_id    INTEGER NOT NULL REFERENCES users(id),
     created_at TIMESTAMP DEFAULT now(),
     expires_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS temp_files (
+    token   TEXT PRIMARY KEY,
+    path    TEXT NOT NULL,
+    expires DOUBLE PRECISION NOT NULL
 );
 """
 
