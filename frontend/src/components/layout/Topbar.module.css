@@ -1,0 +1,39 @@
+.topbar {
+  position: fixed; top: 0; left: 0; right: 0;
+  height: var(--topbar-h);
+  background: var(--surface-card);
+  border-bottom: 1px solid var(--border-light);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 20px; z-index: 50;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.left  { display: flex; align-items: center; gap: 12px; }
+.right { display: flex; align-items: center; gap: 16px; }
+
+.hamburger {
+  display: flex; flex-direction: column; justify-content: center; gap: 4.5px;
+  width: 34px; height: 34px; background: none; border: none;
+  cursor: pointer; padding: 6px; border-radius: 8px; flex-shrink: 0;
+  transition: background .15s;
+}
+.hamburger:hover { background: var(--surface-input); }
+.hamburger span { display: block; height: 1.5px; background: var(--text-primary); border-radius: 2px; }
+
+.logo { display: flex; align-items: center; gap: 8px; }
+.mark {
+  width: 30px; height: 30px; border-radius: 8px;
+  background: var(--brand); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 11px; flex-shrink: 0;
+  letter-spacing: .5px;
+}
+.logoName { font-size: 14px; font-weight: 700; color: var(--text-primary); }
+
+.breadcrumb { display: flex; align-items: center; gap: 6px; margin-left: 4px; }
+.breadSep   { color: var(--border-default); font-size: 13px; }
+.breadItem  { font-size: 12px; font-weight: 500; color: var(--text-secondary); }
+
+.greet { text-align: right; }
+.greetText { font-size: 13px; font-weight: 600; color: var(--text-primary); line-height: 1.2; }
+.greetDate { font-size: 10.5px; color: var(--text-muted); margin-top: 1px; }

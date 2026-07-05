@@ -1,0 +1,90 @@
+.page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.clientGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.clientCard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  cursor: pointer;
+  transition: border-color .15s, box-shadow .15s;
+}
+.clientCard:hover { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-lo); }
+.clientCard.selected { border-color: var(--accent); background: var(--accent-lo); }
+
+.avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.clientName { font-size: 13px; font-weight: 700; }
+.clientMeta { font-size: 10.5px; color: var(--text-dim); }
+
+.quarterGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.quarterCard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  cursor: pointer;
+  transition: border-color .15s;
+}
+.quarterCard:hover { border-color: var(--accent); }
+.quarterCard.selected { border-color: var(--accent); background: var(--accent-lo); }
+.quarterLabel { font-size: 13px; font-weight: 700; }
+.quarterMeta  { font-size: 10px; color: var(--text-dim); margin-top: 2px; }
+
+.stmtCard {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  transition: border-color .15s;
+}
+.stmtCard:hover { border-color: var(--accent); }
+
+.stmtBank {
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.stmtInfo { flex: 1; min-width: 0; }
+.stmtName { font-size: 12px; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stmtMeta { font-size: 10px; color: var(--text-dim); margin-top: 2px; }

@@ -1,0 +1,53 @@
+# DocParse — full stack in one command.
+#
+#   docker compose up --build      → start everything (first time / after updates)
+#   docker compose up -d           → start in the background
+#   docker compose down            → stop
+#   docker compose logs -f app     → watch the app's logs
+#
+# The app is then reachable at http://<this-machine-ip>:5051 from any PC on the
+# office network.
+
+services:
+  # ── PostgreSQL database ──
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: docparse
+      POSTGRES_USER: docparse
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-docparse}
+    volumes:
+      - dbdata:/var/lib/postgresql/data          # data persists across restarts
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U docparse -d docparse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── DocParse app (Flask backend + built frontend, served together) ──
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: docparse
+      DB_USER: docparse
+      DB_PASSWORD: ${DB_PASSWORD:-docparse}
+      HOST: "0.0.0.0"
+      PORT: "5051"
+      # AI provider keys (optional) — read from a .env file next to this compose file
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    ports:
+      - "5051:5051"                               # host:container — office PCs hit host:5051
+    volumes:
+      - ./data:/app/data                          # uploaded files / scratch persist on host
+
+volumes:
+  dbdata:

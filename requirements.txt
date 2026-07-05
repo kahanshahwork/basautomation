@@ -1,0 +1,22 @@
+# DocParse BAS Workflow — Python dependencies
+# Install all: pip install -r requirements.txt
+#
+# OCR (pytesseract + pdf2image) is OPTIONAL — only needed for Suncorp scanned-PDF
+# fallback. The import is wrapped in try/except, so the app runs fine without them.
+# The Tesseract engine itself must be installed on the OS separately if you use it.
+
+# ── Core (always required) ──────────────────────────────────────────────────
+flask>=3.0.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+pdfplumber>=0.11.0
+Pillow>=10.0.0
+openpyxl>=3.1.0
+
+# ── Database + production server (required for the Docker/PostgreSQL stack) ──
+psycopg[binary]>=3.2
+gunicorn>=21.0
+
+# ── OCR fallback for Suncorp scanned PDFs (optional) ────────────────────────
+pytesseract>=0.3.10
+pdf2image>=1.16.0

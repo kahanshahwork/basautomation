@@ -1,0 +1,3 @@
+@echo off
+echo Starting DocParse backend on http://localhost:5051 ...
+python app.py
