@@ -1,9 +1,12 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import './styles/globals.css';
 import { useAppStore } from './store/appStore';
+import { authApi, setUnauthorizedHandler } from './api/client';
 import { Topbar }  from './components/layout/Topbar';
 import { Sidebar } from './components/layout/Sidebar';
 import { ToastContainer } from './components/ui/Toast';
+import { LoginPage }             from './pages/Login';
+import { AdminPage }             from './pages/Admin';
 import { ClientManagementPage } from './pages/ClientManagement';
 import { UploadParsePage }      from './pages/UploadParse';
 import { ApprovePage }          from './pages/Approve';
@@ -18,9 +21,26 @@ import { CategoryManagerPage }  from './pages/CategoryManager';
 import { PlaceholderPage }      from './pages/Placeholder';
 
 export default function App() {
-  const { currentPage } = useAppStore();
+  const { currentPage, authUser, authChecked, setAuthUser, setAuthChecked, setPage } = useAppStore();
   // Sidebar visible by default, hamburger toggles it
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // On load, check for an existing session. Also register the global 401 handler
+  // so any expired/invalid session immediately drops the app back to login.
+  useEffect(() => {
+    setUnauthorizedHandler(() => { setAuthUser(null); });
+    authApi.me()
+      .then(r => setAuthUser(r.user))
+      .catch(() => setAuthUser(null))
+      .finally(() => setAuthChecked(true));
+  }, [setAuthUser, setAuthChecked]);
+
+  // Guard: if a non-admin is somehow on the admin page, bounce them out.
+  useEffect(() => {
+    if (currentPage === 'admin' && authUser && authUser.role !== 'admin') {
+      setPage('clients');
+    }
+  }, [currentPage, authUser, setPage]);
 
   function renderPage() {
     switch (currentPage) {
@@ -35,8 +55,25 @@ export default function App() {
       case 'categorymanager': return <CategoryManagerPage />;
       case 'aicategorize':    return <AiCategorizePage />;
       case 'aivision':        return <AiVisionPage />;
+      case 'admin':           return <AdminPage />;
       default:                return <PlaceholderPage title="Not Found" icon="❓" />;
     }
+  }
+
+  // While the initial session check runs, show nothing (avoids a login flash).
+  if (!authChecked) {
+    return <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: 13 }}>Loading…</div>;
+  }
+
+  // Not logged in → the ONLY thing that renders is the login screen. No app
+  // shell, no data pages — so there is nothing to bypass via URL or state.
+  if (!authUser) {
+    return (
+      <>
+        <LoginPage />
+        <ToastContainer />
+      </>
+    );
   }
 
   return (

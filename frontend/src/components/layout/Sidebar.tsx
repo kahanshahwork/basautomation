@@ -24,7 +24,7 @@ const AI: { page: PageName; label: string; icon: string }[] = [
 interface Props { open: boolean; onClose: () => void; }
 
 export function Sidebar({ open }: Props) {
-  const { currentPage, setPage, navState } = useAppStore();
+  const { currentPage, setPage, navState, authUser } = useAppStore();
 
   function status(page: PageName): NavStepStatus {
     return (navState as unknown as Record<string, NavStepStatus>)[page] ?? 'active';
@@ -94,6 +94,19 @@ export function Sidebar({ open }: Props) {
             </div>
           ))}
         </div>
+
+        {/* Admin — visible only to admin accounts */}
+        {authUser?.role === 'admin' && (
+          <div className={styles.section}>
+            <p className={styles.sectionLabel}>Administration</p>
+            <div
+              className={`${styles.item} ${currentPage === 'admin' ? styles.active : ''}`}
+              onClick={() => nav('admin')}>
+              <span className={styles.itemIcon}>🛡️</span>
+              User Management
+            </div>
+          </div>
+        )}
       </div>
 
       <div className={styles.footer}>DocParse v5 · port 5051</div>

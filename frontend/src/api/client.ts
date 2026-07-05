@@ -19,17 +19,22 @@ import type {
 } from '../types';
 
 // ── Base helpers ─────────────────────────────────────────────────────────
+// credentials:'same-origin' ensures the httpOnly session cookie is sent with
+// every API call (the SPA is served from the same origin as the API).
 async function get<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+  const res = await fetch(url, { credentials: 'same-origin' });
+  if (res.status === 401) { onUnauthorized(); throw new Error('Not authenticated'); }
   if (!res.ok) throw new Error(`GET ${url} → ${res.status}`);
   return res.json();
 }
 async function post<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: 'POST',
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  if (res.status === 401) { onUnauthorized(); throw new Error('Not authenticated'); }
   if (!res.ok) {
     let msg = `POST ${url} → ${res.status}`;
     try { const j = await res.json(); if (j.error) msg = j.error; } catch { /* ignore */ }
@@ -38,7 +43,8 @@ async function post<T>(url: string, body: unknown): Promise<T> {
   return res.json();
 }
 async function postForm<T>(url: string, form: FormData): Promise<T> {
-  const res = await fetch(url, { method: 'POST', body: form });
+  const res = await fetch(url, { method: 'POST', credentials: 'same-origin', body: form });
+  if (res.status === 401) { onUnauthorized(); throw new Error('Not authenticated'); }
   if (!res.ok) {
     let msg = `POST ${url} → ${res.status}`;
     try { const j = await res.json(); if (j.error) msg = j.error; } catch { /* ignore */ }
@@ -49,17 +55,25 @@ async function postForm<T>(url: string, form: FormData): Promise<T> {
 async function patch<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: 'PATCH',
+    credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  if (res.status === 401) { onUnauthorized(); throw new Error('Not authenticated'); }
   if (!res.ok) throw new Error(`PATCH ${url} → ${res.status}`);
   return res.json();
 }
 async function del<T>(url: string): Promise<T> {
-  const res = await fetch(url, { method: 'DELETE' });
+  const res = await fetch(url, { method: 'DELETE', credentials: 'same-origin' });
+  if (res.status === 401) { onUnauthorized(); throw new Error('Not authenticated'); }
   if (!res.ok) throw new Error(`DELETE ${url} → ${res.status}`);
   return res.json();
 }
+
+// When any API call returns 401, notify the app so it can drop to the login screen.
+let _onUnauthorized: (() => void) | null = null;
+export function setUnauthorizedHandler(fn: () => void) { _onUnauthorized = fn; }
+function onUnauthorized() { if (_onUnauthorized) _onUnauthorized(); }
 
 // ── Advisors (top of hierarchy) ──────────────────────────────────────────
 export const advisorsApi = {
@@ -309,4 +323,28 @@ export const aiApi = {
   // Apply pasted/returned "id: Category" text (existing route)
   categorizeApply: (sid: number, responseText: string) =>
     post<{ applied: number; applied_detail: Array<{ id: string; description: string; category: string }>; errors: Array<{ line: string; reason: string }> }>(`/api/statements/${sid}/ai-categorize/apply`, { response_text: responseText }),
+};
+
+// ── Auth & Admin ──────────────────────────────────────────────────────────
+export interface AuthUser { id: number; email: string; name: string | null; role: 'admin' | 'user'; }
+export interface AdminUser extends AuthUser { is_active: 0 | 1; created_at?: string; last_login?: string | null; }
+
+export const authApi = {
+  login: (email: string, password: string) =>
+    post<{ user: AuthUser }>('/api/auth/login', { email, password }),
+  logout: () => post<{ ok: boolean }>('/api/auth/logout', {}),
+  me: () => get<{ user: AuthUser }>('/api/auth/me'),
+  changePassword: (current_password: string, new_password: string) =>
+    post<{ ok: boolean; message?: string }>('/api/auth/change-password', { current_password, new_password }),
+};
+
+export const adminApi = {
+  listUsers: () => get<AdminUser[]>('/api/admin/users'),
+  addUser: (body: { email: string; name: string; password: string; role: 'admin' | 'user' }) =>
+    post<AdminUser>('/api/admin/users', body),
+  updateUser: (id: number, body: Partial<{ name: string; role: 'admin' | 'user'; is_active: boolean }>) =>
+    patch<AdminUser>(`/api/admin/users/${id}`, body),
+  resetPassword: (id: number, new_password: string) =>
+    post<{ ok: boolean; message?: string }>(`/api/admin/users/${id}/reset-password`, { new_password }),
+  deleteUser: (id: number) => del<{ deleted: number }>(`/api/admin/users/${id}`),
 };

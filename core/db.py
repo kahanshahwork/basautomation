@@ -59,6 +59,10 @@ class Row(dict):
 class _Cursor:
     """Wraps a psycopg cursor to accept `?` placeholders and expose .lastrowid."""
 
+    # Tables whose primary key is NOT a column called `id`. INSERTs into these
+    # must NOT get an auto-appended `RETURNING id` (there is no id column).
+    _NO_ID_TABLES = ("sessions",)
+
     def __init__(self, raw):
         self._raw = raw
         self.lastrowid = None
@@ -71,16 +75,12 @@ class _Cursor:
         sql = sql.replace("datetime('now')", "now()")
         return sql
 
-    # Tables whose primary key is NOT a column named "id" — the shim must not
-    # append "RETURNING id" for these (there's no id column to return).
-    _NO_ID_TABLES = ("temp_files",)
-
     def execute(self, sql, params=()):
         sql_t = self._translate(sql)
         low = sql_t.lstrip().lower()
 
-        # Auto-RETURNING id for INSERTs so .lastrowid works like SQLite —
-        # but only for tables that actually have an "id" column.
+        # Auto-RETURNING id for INSERTs so .lastrowid works like SQLite — but skip
+        # tables whose PK isn't `id` (they'd raise "column id does not exist").
         want_lastrowid = (
             low.startswith("insert into")
             and "returning" not in low
@@ -304,11 +304,22 @@ CREATE TABLE IF NOT EXISTS annual_consolidations (
     created_at  TIMESTAMP DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS temp_files (
+CREATE TABLE IF NOT EXISTS users (
+    id            SERIAL PRIMARY KEY,
+    email         TEXT UNIQUE NOT NULL,
+    name          TEXT,
+    password_hash TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'user',
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    created_at    TIMESTAMP DEFAULT now(),
+    last_login    TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
     token      TEXT PRIMARY KEY,
-    path       TEXT NOT NULL,
-    expires    DOUBLE PRECISION NOT NULL,
-    created_at TIMESTAMP DEFAULT now()
+    user_id    INTEGER NOT NULL REFERENCES users(id),
+    created_at TIMESTAMP DEFAULT now(),
+    expires_at TIMESTAMP NOT NULL
 );
 """
 
@@ -323,12 +334,32 @@ def init_db():
     try:
         conn.executescript(SCHEMA)
         conn.commit()
+        _seed_admin(conn)
     except Exception:
         conn.rollback()
         # Another worker created the schema between our check and now — that's fine.
     finally:
         conn.execute("SELECT pg_advisory_unlock(727351)")
         conn.commit()
+
+
+def _seed_admin(conn):
+    """Create the default admin account once, if no admin exists yet.
+    Credentials come from env (ADMIN_EMAIL / ADMIN_PASSWORD) with safe defaults.
+    The password is stored ONLY as a salted PBKDF2 hash — never in plaintext."""
+    from werkzeug.security import generate_password_hash
+    admin_email = os.environ.get("ADMIN_EMAIL", "admin@eternix.com").strip().lower()
+    admin_pw = os.environ.get("ADMIN_PASSWORD", "admin123")
+    existing = conn.execute(
+        "SELECT id FROM users WHERE role = 'admin' LIMIT 1"
+    ).fetchone()
+    if existing:
+        return
+    conn.execute(
+        "INSERT INTO users (email, name, password_hash, role, is_active) VALUES (?,?,?,?,1)",
+        (admin_email, "Administrator", generate_password_hash(admin_pw), "admin"),
+    )
+    conn.commit()
 
 
 def log_audit(entity_type: str, entity_id: int, action: str, detail: str = "", actor: str = "user"):

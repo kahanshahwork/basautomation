@@ -6,11 +6,13 @@
 
 import { create } from 'zustand';
 import type { Client, Quarter, Statement, Category } from '../types';
+import type { AuthUser } from '../api/client';
 
 export type PageName =
   | 'clients' | 'parse' | 'approve' | 'categorize' | 'gst' | 'pnl'
   | 'consolidate'
-  | 'vendormemory' | 'categorymanager' | 'aicategorize' | 'aivision';
+  | 'vendormemory' | 'categorymanager' | 'aicategorize' | 'aivision'
+  | 'admin';
 
 export type NavStepStatus = 'locked' | 'active' | 'done';
 
@@ -25,6 +27,12 @@ interface NavState {
 interface AppState {
   currentPage: PageName;
   setPage: (page: PageName) => void;
+
+  // Auth
+  authUser: AuthUser | null;
+  authChecked: boolean;         // have we run the initial /me check yet?
+  setAuthUser: (u: AuthUser | null) => void;
+  setAuthChecked: (v: boolean) => void;
 
   // Context
   activeClientId: number | null;
@@ -64,6 +72,11 @@ const defaultNav: NavState = {
 export const useAppStore = create<AppState>((set) => ({
   currentPage: 'clients',
   setPage: (page) => set({ currentPage: page }),
+
+  authUser: null,
+  authChecked: false,
+  setAuthUser: (u) => set({ authUser: u }),
+  setAuthChecked: (v) => set({ authChecked: v }),
 
   activeClientId: null,
   activeClientName: null,
